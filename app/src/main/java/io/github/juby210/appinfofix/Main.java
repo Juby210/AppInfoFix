@@ -7,6 +7,7 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Resources;
 import android.os.AsyncTask;
+import android.os.Bundle;
 import android.view.View;
 
 import java.lang.reflect.Field;
@@ -25,7 +26,10 @@ public final class Main implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
-        if (!lpparam.packageName.equals(settingsPackage)) return;
+        if (!lpparam.packageName.equals(settingsPackage)) {
+            hookLauncher(lpparam.classLoader);
+            return;
+        }
 
         var cl = lpparam.classLoader;
         hookComposeSettings(cl);
@@ -141,6 +145,70 @@ public final class Main implements IXposedHookLoadPackage {
                 }
             }
         );
+    }
+
+    public static String KEY_PACKAGE_NAME = "pref_app_info_package_name";
+
+    public static void hookLauncher(ClassLoader cl) throws Throwable {
+        var c = XposedHelpers.findClassIfExists("com.android.launcher3.customization.InfoBottomSheet$PrefsFragment", cl);
+        if (c == null) return;
+
+        var charSeq = CharSequence.class;
+        var intClass = int.class;
+
+        var prefFrag = XposedHelpers.findClass("androidx.preference.PreferenceFragment", cl);
+        var getPrefScreen = setMAccessible(prefFrag.getDeclaredMethod("getPreferenceScreen"));
+        var findPref = setMAccessible(prefFrag.getDeclaredMethod("findPreference", charSeq));
+        var prefGroup = XposedHelpers.findClass("androidx.preference.PreferenceGroup", cl);
+        var preference = XposedHelpers.findClass("androidx.preference.Preference", cl);
+        var addPref = setMAccessible(prefGroup.getDeclaredMethod("addPreference", preference));
+
+        var newPref = preference.getDeclaredConstructor(Context.class);
+        newPref.setAccessible(true);
+        var getContext = setMAccessible(preference.getDeclaredMethod("getContext"));
+        var setKey = setMAccessible(preference.getDeclaredMethod("setKey", String.class));
+        var setTitle = setMAccessible(preference.getDeclaredMethod("setTitle", charSeq));
+        var setPersistent = setMAccessible(preference.getDeclaredMethod("setPersistent", boolean.class));
+        var setOrder = setMAccessible(preference.getDeclaredMethod("setOrder", intClass));
+        var setIcon = setMAccessible(preference.getDeclaredMethod("setIcon", intClass));
+        var setLayoutResource = setMAccessible(preference.getDeclaredMethod("setLayoutResource", intClass));
+        var setSummary = setMAccessible(preference.getDeclaredMethod("setSummary", charSeq));
+
+        var itemInfo = XposedHelpers.findClass("com.android.launcher3.model.data.ItemInfo", cl);
+        var getTargetPackage = setMAccessible(itemInfo.getDeclaredMethod("getTargetPackage"));
+
+        int icon;
+        try {
+            icon = setFAccessible(XposedHelpers.findClass("com.android.launcher3.R$drawable", cl)
+                .getDeclaredField("app_manager")).getInt(null);
+        } catch (Throwable ignored) {
+            icon = 0;
+        }
+        var layout = setFAccessible(XposedHelpers.findClass("com.android.launcher3.R$layout", cl)
+            .getDeclaredField("settings_layout")).getInt(null);
+
+        var finalIcon = icon;
+        XposedBridge.hookMethod(c.getDeclaredMethod("onCreatePreferences", Bundle.class, String.class), new XC_MethodHook() {
+            /** @noinspection JavaReflectionInvocation*/
+            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                var screen = getPrefScreen.invoke(param.thisObject);
+                var pref = newPref.newInstance(getContext.invoke(screen));
+                setKey.invoke(pref, KEY_PACKAGE_NAME);
+                setTitle.invoke(pref, "Package name");
+                setPersistent.invoke(pref, Boolean.FALSE);
+                setOrder.invoke(pref, 3);
+                if (finalIcon != 0) setIcon.invoke(pref, finalIcon);
+                setLayoutResource.invoke(pref, layout);
+                addPref.invoke(screen, pref);
+            }
+        });
+
+        XposedBridge.hookMethod(c.getDeclaredMethod("loadForApp", itemInfo), new XC_MethodHook() {
+            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                var pref = findPref.invoke(param.thisObject, KEY_PACKAGE_NAME);
+                setSummary.invoke(pref, getTargetPackage.invoke(param.args[0]));
+            }
+        });
     }
 
     public static Field setFAccessible(Field f) {
