@@ -1,114 +1,163 @@
 package io.github.juby210.appinfofix;
 
+import android.annotation.SuppressLint;
+import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Resources;
 import android.os.AsyncTask;
-import android.util.Pair;
 import android.view.View;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.Set;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
-public class Main implements IXposedHookLoadPackage {
+@SuppressLint("DiscouragedApi")
+public final class Main implements IXposedHookLoadPackage {
     private static final String settingsPackage = "com.android.settings";
 
     @Override
-    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
+    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
         if (!lpparam.packageName.equals(settingsPackage)) return;
 
-        boolean hasPackageName =
-                XposedHelpers.findClassIfExists("com.android.settings.applications.appinfo.AppPackageNamePreferenceController", lpparam.classLoader) != null;
+        var cl = lpparam.classLoader;
+        hookComposeSettings(cl);
 
-        XposedHelpers.findAndHookMethod(
-                "com.android.settings.applications.appinfo.AppVersionPreferenceController",
-                lpparam.classLoader,
-                "getSummary",
-                new XC_MethodHook() {
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        Object mParent = XposedHelpers.getObjectField(param.thisObject, "mParent");
-                        PackageInfo info = (PackageInfo) XposedHelpers.callMethod(mParent, "getPackageInfo");
-                        param.setResult(param.getResult() + " (" + info.getLongVersionCode() + ")"
-                                + (hasPackageName ? "" : "\n\n" + info.packageName));
-                    }
+        var hasPackageName =
+            XposedHelpers.findClassIfExists("com.android.settings.applications.appinfo.AppPackageNamePreferenceController", cl) != null;
+
+        var mParent = setFAccessible(XposedHelpers.findClass("com.android.settings.applications.appinfo.AppInfoPreferenceControllerBase", cl)
+            .getDeclaredField("mParent"));
+        var getPackageInfo = setMAccessible(mParent.getType().getDeclaredMethod("getPackageInfo"));
+
+        XposedBridge.hookMethod(
+            XposedHelpers.findClass("com.android.settings.applications.appinfo.AppVersionPreferenceController", cl)
+                .getDeclaredMethod("getSummary"),
+            new XC_MethodHook() {
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    var info = (PackageInfo) getPackageInfo.invoke(mParent.get(param.thisObject));
+                    if (info != null) param.setResult(param.getResult() + " (" + info.getLongVersionCode() + ")"
+                        + (hasPackageName ? "" : "\n\n" + info.packageName));
                 }
+            }
         );
 
         // add disable/enable button
-        XposedHelpers.findAndHookMethod(
-                "com.android.settings.applications.appinfo.AppButtonsPreferenceController",
-                lpparam.classLoader,
-                "updateUninstallButton",
-                new XC_MethodHook() {
-                    @SuppressWarnings({"deprecation", "unchecked"})
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        Object mAppEntry = XposedHelpers.getObjectField(param.thisObject, "mAppEntry");
-                        ApplicationInfo info = (ApplicationInfo) XposedHelpers.getObjectField(mAppEntry, "info");
-                        if ((info.flags & ApplicationInfo.FLAG_SYSTEM) != 0) return;
-                        Set<String> mHomePackages = (Set<String>) XposedHelpers.getObjectField(param.thisObject, "mHomePackages");
-                        Object mActivity = XposedHelpers.getObjectField(param.thisObject, "mActivity");
-                        Resources res = (Resources) XposedHelpers.callMethod(mActivity, "getResources");
-                        PackageManager mPm = (PackageManager) XposedHelpers.getObjectField(param.thisObject, "mPm");
-                        boolean isSystemPackage = (boolean) XposedHelpers.callMethod(
-                                param.thisObject,
-                                "isSystemPackage",
-                                res, mPm,
-                                XposedHelpers.getObjectField(param.thisObject, "mPackageInfo")
-                        );
-                        if (mHomePackages.contains(info.packageName) || isSystemPackage) return;
+        var c = XposedHelpers.findClass("com.android.settings.applications.appinfo.AppButtonsPreferenceController", cl);
+        var mAppEntry = setFAccessible(c.getDeclaredField("mAppEntry"));
+        var mInfo = setFAccessible(mAppEntry.getType().getDeclaredField("info"));
 
-                        Object mButtonsPref = XposedHelpers.getObjectField(param.thisObject, "mButtonsPref");
-                        boolean isDisabledUntilUsed = (boolean) XposedHelpers.callMethod(param.thisObject, "isDisabledUntilUsed");
-                        boolean enabled = info.enabled && !isDisabledUntilUsed;
-                        boolean disableable;
-                        if (enabled) {
-                            Set<String> keepEnabledPackages = (Set<String>) XposedHelpers.callMethod(XposedHelpers.getObjectField(param.thisObject, "mApplicationFeatureProvider"), "getKeepEnabledPackages");
-                            disableable = !keepEnabledPackages.contains(info.packageName);
-                        } else disableable = true;
-                        XposedHelpers.callMethod(mButtonsPref, "setButton4Text",
-                                enabled ? getStringId(res, "disable_text") : getStringId(res, "enable_text"));
-                        XposedHelpers.callMethod(mButtonsPref, "setButton4Icon",
-                                enabled ? getDrawableId(res, "ic_settings_disable") : getDrawableId(res, "ic_settings_enable"));
-                        setButton4Enabled(mButtonsPref, disableable);
+        var mHomePackages = setFAccessible(c.getDeclaredField("mHomePackages"));
+        var mActivity = setFAccessible(c.getDeclaredField("mActivity"));
+        var mPm = setFAccessible(c.getDeclaredField("mPm"));
+        var mPackageInfo = setFAccessible(c.getDeclaredField("mPackageInfo"));
+        var isSystemPackage = setMAccessible(c.getDeclaredMethod("isSystemPackage", Resources.class, PackageManager.class, PackageInfo.class));
 
-                        XposedHelpers.callMethod(mButtonsPref, "setButton4OnClickListener", (View.OnClickListener) v -> {
-                            XposedHelpers.callMethod(
-                                    XposedHelpers.getObjectField(param.thisObject, "mMetricsFeatureProvider"),
-                                    "action",
-                                    mActivity,
-                                    info.enabled ? 874 : 875,
-                                    new Pair[0]
-                            );
-                            AsyncTask.execute((Runnable) XposedHelpers.newInstance(
-                                    XposedHelpers.findClass(
-                                            "com.android.settings.applications.appinfo.AppButtonsPreferenceController$DisableChangerRunnable",
-                                            lpparam.classLoader
-                                    ),
-                                    param.thisObject, mPm, info.packageName, info.enabled ? 3 : 0
-                            ));
-                        });
+        var mButtonsPref = setFAccessible(c.getDeclaredField("mButtonsPref"));
+        var mIsDisabledUntilUsed = setMAccessible(c.getDeclaredMethod("isDisabledUntilUsed"));
+        var mApplicationFeatureProvider = setFAccessible(c.getDeclaredField("mApplicationFeatureProvider"));
+        var getKeepEnabledPackages = setMAccessible(mApplicationFeatureProvider.getType().getDeclaredMethod("getKeepEnabledPackages"));
+
+        var buttonsPrefClass = mButtonsPref.getType();
+        var setButton4Text = setMAccessible(buttonsPrefClass.getDeclaredMethod("setButton4Text", int.class));
+        var setButton4Icon = setMAccessible(buttonsPrefClass.getDeclaredMethod("setButton4Icon", int.class));
+        var setButton4OnClickListener = setMAccessible(buttonsPrefClass.getDeclaredMethod("setButton4OnClickListener", View.OnClickListener.class));
+
+        var disableChangerRunnable = XposedHelpers
+            .findClass("com.android.settings.applications.appinfo.AppButtonsPreferenceController$DisableChangerRunnable", cl)
+            .getDeclaredConstructor(c, PackageManager.class, String.class, int.class);
+        disableChangerRunnable.setAccessible(true);
+
+        var mButton4Info = setFAccessible(buttonsPrefClass.getDeclaredField("mButton4Info"));
+        var mIsEnabled = setFAccessible(mButton4Info.getType().getDeclaredField("mIsEnabled"));
+        var notifyChanged = setMAccessible(buttonsPrefClass.getDeclaredMethod("notifyChanged"));
+
+        XposedBridge.hookMethod(c.getDeclaredMethod("updateUninstallButton"), new XC_MethodHook() {
+            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                var _this = param.thisObject;
+                var info = (ApplicationInfo) mInfo.get(mAppEntry.get(_this));
+                if ((info.flags & ApplicationInfo.FLAG_SYSTEM) != 0) return;
+
+                var packageName = info.packageName;
+                var homePackages = (Set<?>) mHomePackages.get(_this);
+                if (homePackages.contains(packageName)) return;
+
+                var ctx = (Context) mActivity.get(_this);
+                var res = ctx.getResources();
+                var pm = (PackageManager) mPm.get(_this);
+                if (isSystemPackage.invoke(_this, res, pm, mPackageInfo.get(_this)) == Boolean.TRUE) return;
+
+                var isDisabledUntilUsed = (boolean) mIsDisabledUntilUsed.invoke(_this);
+                var enabled = info.enabled && !isDisabledUntilUsed;
+                var disableable = !enabled || !((Set<?>) getKeepEnabledPackages.invoke(mApplicationFeatureProvider.get(_this))).contains(packageName);
+                var buttonsPref = mButtonsPref.get(_this);
+                setButton4Text.invoke(buttonsPref, getStringId(res, enabled ? "disable_text" : "enable_text"));
+                setButton4Icon.invoke(buttonsPref, getDrawableId(res, enabled ? "ic_settings_disable" : "ic_settings_enable"));
+                setButton4OnClickListener.invoke(buttonsPref, (View.OnClickListener) v -> {
+                    try {
+                        AsyncTask.execute((Runnable) disableChangerRunnable.newInstance(_this, pm, packageName, info.enabled ? 3 : 0));
+                    } catch (Throwable e) {
+                        XposedBridge.log(e);
+                    }
+                });
+                var buttonInfo = mButton4Info.get(buttonsPref);
+                if (disableable != mIsEnabled.getBoolean(buttonInfo)) {
+                    mIsEnabled.setBoolean(buttonInfo, disableable);
+                    notifyChanged.invoke(buttonsPref);
+                }
+            }
+        });
+    }
+
+    // Android 14+ compose settings
+    public static void hookComposeSettings(ClassLoader cl) throws Throwable {
+        var c = XposedHelpers.findClassIfExists("com.android.settingslib.spaprivileged.template.app.AppInfoProvider$Companion", cl);
+        if (c == null) return; // no compose settings
+        XposedBridge.hookMethod(c.getDeclaredMethod("getVersionNameBidiWrapped", PackageInfo.class), new XC_MethodHook() {
+            protected void afterHookedMethod(MethodHookParam param) {
+                var info = (PackageInfo) param.args[0];
+                param.setResult(param.getResult() + " (" + info.getLongVersionCode() + ")");
+            }
+        });
+
+        XposedBridge.hookMethod(
+            XposedHelpers.findClass("com.android.settings.spa.app.appinfo.AppDisableButton", cl)
+                .getDeclaredMethod("getActionButton", ApplicationInfo.class, XposedHelpers.findClass("androidx.compose.runtime.Composer", cl), int.class),
+            new XC_MethodHook() {
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    var info = (ApplicationInfo) param.args[0];
+                    if ((info.flags & ApplicationInfo.FLAG_SYSTEM) == 0) {
+                        var info2 = new ApplicationInfo(info);
+                        info2.flags |= ApplicationInfo.FLAG_SYSTEM;
+                        param.args[0] = info2;
                     }
                 }
+            }
         );
+    }
+
+    public static Field setFAccessible(Field f) {
+        f.setAccessible(true);
+        return f;
+    }
+
+    public static Method setMAccessible(Method m) {
+        m.setAccessible(true);
+        return m;
     }
 
     public static int getStringId(Resources res, String name) {
         return res.getIdentifier(name, "string", settingsPackage);
     }
+
     public static int getDrawableId(Resources res, String name) {
         return res.getIdentifier(name, "drawable", settingsPackage);
-    }
-    public static void setButton4Enabled(Object mButtonsPref, boolean enabled) {
-        Object mButton4Info = XposedHelpers.getObjectField(mButtonsPref, "mButton4Info");
-        boolean mIsEnabled = XposedHelpers.getBooleanField(mButton4Info, "mIsEnabled");
-        if (enabled != mIsEnabled) {
-            XposedHelpers.setBooleanField(mButton4Info, "mIsEnabled", enabled);
-            XposedHelpers.callMethod(mButtonsPref, "notifyChanged");
-        }
     }
 }
